@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>꽃잎반 말하기 놀이터 - 마이크</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 22px; min-height: 100vh;
+      font-family: "Malgun Gothic", "Noto Sans KR", sans-serif;
+      background: #fff9f1; color: #353535;
+      display: flex; align-items: center; justify-content: center;
+    }
+    main {
+      width: min(100%, 520px); background: white; border: 2px solid #f1e5d8;
+      border-radius: 28px; padding: 24px; text-align: center;
+      box-shadow: 0 8px 0 rgba(191,162,132,.12);
+    }
+    h1 { font-size: clamp(24px, 5vw, 34px); margin: 0 0 12px; }
+    p { font-size: 18px; line-height: 1.55; }
+    #status {
+      display: inline-block; padding: 9px 15px; border-radius: 999px;
+      background: #fff0c9; font-weight: 800; margin: 8px 0 18px;
+    }
+    #transcript {
+      min-height: 100px; background: #fffaf3; border: 2px dashed #ead9c8;
+      border-radius: 18px; padding: 16px; font-size: 24px; line-height: 1.5;
+      text-align: left; overflow-wrap: anywhere; margin: 10px 0 20px;
+    }
+    button {
+      width: 100%; border: 0; border-radius: 20px; min-height: 64px;
+      padding: 14px; font-size: 22px; font-weight: 800; cursor: pointer;
+      margin: 7px 0;
+    }
+    #start { background: #f7dce5; color: #6b3044; }
+    #stop { background: #dff2df; color: #24572b; }
+    #close { background: #eeeeee; color: #444; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .small { font-size: 14px; color: #666; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>🎤 말하기 마이크</h1>
+  <p>아래 버튼을 누른 뒤 하고 싶은 말을 해 보세요.</p>
+  <div id="status">마이크를 시작할 준비가 됐어요</div>
+  <div id="transcript" aria-live="polite">말한 내용이 여기에 나타나요.</div>
+  <button id="start">🎙️ 마이크 시작</button>
+  <button id="stop" disabled>말하기 끝!</button>
+  <button id="close">창 닫기</button>
+  <p class="small">인식된 문장은 원래 앱으로 전달됩니다. 마이크 소리 자체는 이 페이지에서 저장하지 않습니다.</p>
+</main>
+<script>
+(() => {
+  const statusEl = document.getElementById('status');
+  const transcriptEl = document.getElementById('transcript');
+  const startBtn = document.getElementById('start');
+  const stopBtn = document.getElementById('stop');
+  const closeBtn = document.getElementById('close');
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let recognition = null;
+  let active = false;
+  let userStopped = false;
+  let finalText = '';
+  let interimText = '';
+  let restartTimer = null;
+
+  function send(type, extra = {}) {
+    if (window.opener && !window.opener.closed) {
+      window.opener.postMessage({ type, ...extra }, '*');
+    }
+  }
+
+  function status(message) { statusEl.textContent = message; }
+
+  function paint() {
+    const text = (finalText + ' ' + interimText).trim();
+    transcriptEl.textContent = text || '말한 내용이 여기에 나타나요.';
+    send('KOTIPBAN_RESULT', { transcript: text });
+  }
+
+  function reportError(error) {
+    const messages = {
+      'not-allowed': '브라우저가 마이크 접근을 거부했습니다. 이 페이지의 마이크 권한과 기기 설정을 확인해 주세요.',
+      'service-not-allowed': '브라우저의 음성 인식 서비스가 차단되었습니다.',
+      'audio-capture': '사용 가능한 마이크를 찾을 수 없습니다.',
+      'network': '음성 인식 서비스 연결에 실패했습니다. 인터넷 연결을 확인해 주세요.',
+      'no-speech': '아직 목소리가 들리지 않아요. 마이크 가까이에서 말해 보세요.',
+      'language-not-supported': '한국어 음성 인식을 지원하지 않습니다.'
+    };
+    status(messages[error] || ('음성 인식 오류: ' + error));
+    send('KOTIPBAN_ERROR', { error, message: messages[error] || ('음성 인식 오류: ' + error) });
+  }
+
+  function buildRecognition() {
+    const rec = new SpeechRecognition();
+    rec.lang = 'ko-KR';
+    rec.continuous = true;
+    rec.interimResults = true;
+    rec.maxAlternatives = 1;
+
+    rec.onstart = () => {
+      active = true;
+      status('듣고 있어요. 천천히 말해 주세요.');
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      send('KOTIPBAN_STARTED');
+    };
+
+    rec.onresult = event => {
+      interimText = '';
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const result = event.results[i];
+        const spoken = result[0].transcript;
+        if (result.isFinal) finalText += spoken + ' ';
+        else interimText += spoken;
+      }
+      paint();
+    };
+
+    rec.onerror = event => {
+      if (event.error === 'no-speech') {
+        reportError(event.error);
+        return; // 일시적인 무음 오류는 계속 듣기를 시도합니다.
+      }
+      reportError(event.error || 'unknown');
+      if (['not-allowed', 'service-not-allowed', 'audio-capture',
+           'network', 'language-not-supported'].includes(event.error)) {
+        userStopped = true;
+        active = false;
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+      }
+    };
+
+    rec.onend = () => {
+      active = false;
+      if (!userStopped) {
+        status('다시 연결하고 있어요…');
+        clearTimeout(restartTimer);
+        restartTimer = setTimeout(() => {
+          if (userStopped) return;
+          try {
+            recognition = buildRecognition();
+            recognition.start();
+          } catch (e) {
+            reportError('start-failed');
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+          }
+        }, 350);
+      } else {
+        status('말하기를 마쳤어요. 원래 화면으로 돌아가세요.');
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+        send('KOTIPBAN_STOPPED', { transcript: (finalText + ' ' + interimText).trim() });
+      }
+    };
+    return rec;
+  }
+
+  function start() {
+    if (!SpeechRecognition) {
+      reportError('unsupported');
+      status('이 브라우저는 음성 인식을 지원하지 않습니다. Chrome에서 열어 주세요.');
+      return;
+    }
+    userStopped = false;
+    finalText = '';
+    interimText = '';
+    paint();
+    try {
+      recognition = buildRecognition();
+      recognition.start();
+      status('마이크를 연결하고 있어요…');
+    } catch (e) {
+      reportError('start-failed');
+    }
+  }
+
+  function stop() {
+    userStopped = true;
+    clearTimeout(restartTimer);
+    if (recognition && active) {
+      try { recognition.stop(); } catch (e) {}
+    } else {
+      active = false;
+      status('말하기를 마쳤어요. 원래 화면으로 돌아가세요.');
+      send('KOTIPBAN_STOPPED', { transcript: (finalText + ' ' + interimText).trim() });
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+    }
+  }
+
+  startBtn.addEventListener('click', start);
+  stopBtn.addEventListener('click', stop);
+  closeBtn.addEventListener('click', () => window.close());
+
+  window.addEventListener('message', event => {
+    if (!event.data || event.data.type !== 'KOTIPBAN_STOP') return;
+    stop();
+  });
+
+  send('KOTIPBAN_READY');
+})();
+</script>
+</body>
+</html>
